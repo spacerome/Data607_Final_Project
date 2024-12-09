@@ -1,0 +1,445 @@
+---
+title: "Data607: Final Project"
+author: "Anthony Josue Roman"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+editor: visual
+---
+
+```{r include=FALSE}
+library(rsconnect)
+library(readr)
+library(RCurl)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(data.table)
+library(DT)
+library(plotly)
+library(cluster)
+library(astrolibR) # devtools::install_github("cran/astrolibR") if needed
+library(FNN)
+library(ggcorrplot)
+```
+
+## Introduction
+
+Exoplanet research has advanced significantly due to the development of various detection methods, such as transit photometry and radial velocity. This project aims to explore the distribution and characteristics of exoplanets discovered using these methods. Specifically, it investigates whether certain types of stars are more likely to host exoplanets with specific characteristics, such as size or orbital distance. 
+
+Data for this analysis is sourced from the NASA Exoplanet Archive and the Gaia catalog. By analyzing these datasets, this project seeks to provide insights into the efficacy of detection methods and trends in exoplanet distributions, with a focus on identifying Earth-like planets in the habitable zone.
+
+## Data Acquisition
+
+Two primary data sources are utilized in this project:
+
+1. **NASA Exoplanet Archive**: Provides data on exoplanet characteristics, detection methods, and host star properties.
+2. **Gaia Catalog**: Supplements the exoplanet data with detailed stellar properties, such as mass and temperature.
+
+## Data Cleaning and Transformation
+
+The acquired datasets are cleaned and merged on common identifiers. Missing values are handled, and data units are standardized to facilitate analysis. Derived metrics, such as the habitable zone indicator, are calculated.
+
+## Analysis Techniques
+
+- **Exploratory Data Analysis (EDA)**: Used to visualize distributions and relationships in the data.
+- **Statistical Analysis**: Regression models and hypothesis tests are employed to identify significant trends and relationships.
+- **Visualization**: Trends and insights are highlighted using visualizations such as histograms, scatter plots, and box plots.
+
+## The Data
+
+The primary dataset used in this analysis is the NASA Exoplanet Archive, which contains information on exoplanet characteristics, host stars, and detection methods. The Gaia catalog provides additional stellar properties that are merged with the exoplanet data.
+
+The gaia dataset has been pulled from the [Gaia catalogue](https://gea.esac.esa.int/archive/) utilizing ADQL queries. The data is stored in a csv file and is read into the R environment for further analysis.
+
+The following code block is the ADQL query used to pull the data from the Gaia catalogue.
+
+```{SQL, eval=FALSE}
+
+SELECT TOP 1000000
+    g.source_id, 
+    g.ra, 
+    g.dec, 
+    g.parallax, 
+    g.pmra, 
+    g.pmdec, 
+    g.phot_g_mean_mag, 
+    ap.teff_gspphot AS effective_temperature, 
+    ap.radius_gspphot AS radius
+FROM 
+    gaiadr3.gaia_source AS g
+JOIN 
+    gaiadr3.astrophysical_parameters AS ap
+ON 
+    g.source_id = ap.source_id
+WHERE 
+    g.parallax IS NOT NULL -- Ensure stars have measured distances
+    AND ap.teff_gspphot BETWEEN 3000 AND 10000 -- Filter for main-sequence stars
+    AND g.phot_g_mean_mag < 15 -- Select bright stars for better precision
+    AND g.parallax > 0; -- Ensure positive parallaxes
+    
+```
+
+The following code block reads the Gaia data from the csv file into the R environment which will be named `1733699369823O-result.csv`. The exoplanet data was pulled from the NASA Exoplanet Archive API and is stored in a csv file named `PSCompPars_2024.12.08_15.06.49.csv`. Utilizing python, the metadata on the first 80 lines were removed to make the data more readable. The cleaned csv file is now called `cleaned_nasa_exoplanet_data.csv`. Both data are used to match the files are used to match the data from nasa and gaia to eliminate any noises utilizing the following python code:
+
+```{python, eval=FALSE}
+
+import pandas as pd
+from astropy.coordinates import SkyCoord
+from astropy import units as u
+
+# Load the datasets
+gaia_data = pd.read_csv("1733699369823O-result.csv")
+nasa_data = pd.read_csv("cleaned_nasa_exoplanet_data.csv")
+
+# Clean Data
+def clean_coordinates(data, ra_col='ra', dec_col='dec'):
+    # Drop rows with missing RA/Dec
+    data = data.dropna(subset=[ra_col, dec_col])
+
+    # Convert RA/Dec to numeric, remove invalid values
+    data[ra_col] = pd.to_numeric(data[ra_col], errors='coerce')
+    data[dec_col] = pd.to_numeric(data[dec_col], errors='coerce')
+    data = data.dropna(subset=[ra_col, dec_col])
+
+    # Ensure RA is between 0 and 360, and Dec is between -90 and 90
+    data = data[(data[ra_col] >= 0) & (data[ra_col] <= 360) &
+                (data[dec_col] >= -90) & (data[dec_col] <= 90)]
+    return data
+
+# Clean Gaia and NASA data
+gaia_data = clean_coordinates(gaia_data)
+nasa_data = clean_coordinates(nasa_data)
+
+# Convert RA/Dec to SkyCoord Objects
+gaia_coords = SkyCoord(ra=gaia_data['ra'].values * u.degree, dec=gaia_data['dec'].values * u.degree)
+nasa_coords = SkyCoord(ra=nasa_data['ra'].values * u.degree, dec=nasa_data['dec'].values * u.degree)
+
+# Match by Angular Separation (< 1 arcsecond)
+tolerance = 1 * u.arcsec
+idx, sep, _ = nasa_coords.match_to_catalog_sky(gaia_coords)
+
+# Filter matches within the tolerance
+valid_matches = sep < tolerance
+matched_nasa = nasa_data.iloc[valid_matches].reset_index(drop=True)
+matched_gaia = gaia_data.iloc[idx[valid_matches]].reset_index(drop=True)
+
+# Combine Matched Data
+combined_data = pd.concat([matched_nasa, matched_gaia], axis=1)
+
+# Save the combined data to a CSV file
+output_file = "matched_exoplanet_gaia_data.csv"
+combined_data.to_csv(output_file, index=False)
+print(f"Matched data saved as '{output_file}'")
+
+```
+
+## Exploratory Data Analysis (EDA)
+
+The exploratory data analysis focuses on understanding the distribution and relationships of key stellar and exoplanetary parameters in the matched dataset. The primary goals are to identify patterns and trends in the data and ensure its quality for further analysis.
+
+### Effective Temperature Distribution
+
+A histogram of stellar effective temperatures provides insights into the thermal properties of the dataset. Most stars fall within the range of **4,000 K** to **6,500 K**, characteristic of main-sequence stars.
+
+```{r prereq, include = FALSE}
+# Load matched data
+matched_data <- read_csv("matched_exoplanet_gaia_data.csv")
+
+# Preview the dataset
+#head(matched_data)
+
+# Summary of key variables
+#summary(matched_data)
+
+# Check for missing values
+#colSums(is.na(matched_data))
+
+# Ensure luminosity is calculated
+matched_data <- matched_data %>%
+  mutate(luminosity = (radius^2) * (effective_temperature / 5778)^4)
+
+# Calculate habitable zone boundaries and classify planets
+matched_data <- matched_data %>%
+  mutate(
+    habitable_zone_inner = 0.75 * sqrt(luminosity),
+    habitable_zone_outer = 1.5 * sqrt(luminosity),
+    in_habitable_zone = radius > habitable_zone_inner & radius < habitable_zone_outer
+  )
+
+```
+
+```{r effective-temperature-distribution, echo=TRUE, message=FALSE, warning=FALSE}
+# Distribution of effective temperatures
+ggplot(matched_data, aes(x = effective_temperature)) +
+  geom_histogram(binwidth = 100, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Stellar Effective Temperatures",
+       x = "Effective Temperature (K)",
+       y = "Frequency") +
+  theme_minimal()
+```
+
+This histogram illustrates the distribution of effective temperatures for the matched dataset. The majority of stars have effective temperatures between 4,000 K and 6,500 K, which is typical for main-sequence stars. Outliers may represent evolved stars or measurement errors.
+
+### Stellar Radius vs. Mass
+
+The scatter plot below illustrates the relationship between stellar radius and mass. A positive correlation is observed, consistent with stellar evolution models. Outliers may correspond to evolved stars or measurement uncertainties.
+
+```{r stellar-radius-mass, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Stellar radius vs. mass scatter plot (updated for `st_mass`)
+ggplot(matched_data, aes(x = radius, y = st_mass)) +
+  geom_point(color = "darkred", alpha = 0.7) +
+  labs(title = "Stellar Radius vs. Mass",
+       x = "Radius (Solar Radii)",
+       y = "Mass (Solar Masses)") +
+  theme_minimal()
+
+```
+
+The scatter plot above shows a positive correlation between stellar radius and mass, consistent with stellar evolution models. Most stars fall within the expected range, with outliers potentially indicating evolved stars or measurement errors. The relationship between these parameters is fundamental to understanding stellar properties and evolution.
+
+### Logarithmic Luminosity Distribution
+
+Using the calculated luminosity (\( L = R^2 \times (T / 5778)^4 \)), the histogram below shows the logarithmic distribution of stellar luminosities. The majority of stars have luminosities typical of main-sequence stars, while outliers indicate giants or subgiants.
+
+```{r luminosity-distribution, echo=TRUE, message=FALSE, warning=FALSE}
+# Calculate luminosity (L = R^2 * (T / 5778)^4)
+matched_data <- matched_data %>%
+  mutate(luminosity = (radius^2) * (effective_temperature / 5778)^4)
+
+# Remove rows with missing or invalid luminosity values
+matched_data <- matched_data %>%
+  filter(!is.na(luminosity), luminosity > 0)
+
+# Create a histogram of log10 luminosity
+ggplot(matched_data, aes(x = log10(luminosity))) +
+  geom_histogram(binwidth = 0.1, fill = "green", color = "black") +
+  labs(title = "Logarithmic Distribution of Stellar Luminosity",
+       x = "Log Luminosity (Solar Units)",
+       y = "Frequency") +
+  theme_minimal()
+```
+
+The histogram above displays the logarithmic distribution of stellar luminosities, calculated using the Stefan-Boltzmann law. Most stars exhibit luminosities typical of main-sequence stars, while outliers may represent giants or subgiants. Understanding stellar luminosities is crucial for characterizing stellar properties and identifying potential exoplanet hosts.
+
+### Habitable Zone by Star Type
+
+The density plot below visualizes the distribution of effective temperatures for stars with exoplanets in the habitable zone. The habitable zone is defined as the region around a star where liquid water could exist on a planet's surface. The plot highlights the effective temperature ranges conducive to habitability.
+
+```{r habitable-zone-star-type1, echo=TRUE, message=FALSE, warning=FALSE}
+# Density plot of effective temperature and habitability
+ggplot(matched_data, aes(x = effective_temperature, fill = as.factor(in_habitable_zone))) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Effective Temperature and Habitability",
+    x = "Effective Temperature (K)",
+    y = "Density",
+    fill = "In Habitable Zone"
+  ) +
+  scale_fill_manual(
+    values = c("FALSE" = "red", "TRUE" = "green"),
+    labels = c("Outside HZ", "In HZ")
+  ) +
+  theme_minimal()
+```
+
+The density plot above visualizes the distribution of effective temperatures for stars with exoplanets in the habitable zone. The habitable zone is defined as the region around a star where liquid water could exist on a planet's surface. The plot highlights the effective temperature ranges conducive to habitability, providing insights into the distribution of potentially habitable planets around different types of stars. The plot below is cleaner with a limit of 10,000 K to make it easier to read. Each star is colored based on whether it is in the habitable zone or not.
+
+### Orbital Distance vs. Exoplanet Size
+
+The scatter plot below visualizes the relationship between exoplanet size and orbital distance. Planets in the habitable zone are highlighted in green, providing insights into the distribution of potentially habitable exoplanets.
+
+```{r orbital-distance-size, echo=TRUE, message=FALSE, warning=FALSE}
+# Scatter plot of orbital distance vs exoplanet size
+ggplot(matched_data, aes(x = radius, y = pl_rade, color = in_habitable_zone)) +
+  geom_point(alpha = 0.7) +
+  scale_color_manual(values = c("FALSE" = "red", "TRUE" = "green")) +
+  labs(title = "Orbital Distance vs. Exoplanet Size",
+       x = "Orbital Distance (AU)",
+       y = "Planet Radius (Earth Radii)",
+       color = "In Habitable Zone") +
+  theme_minimal()
+```
+
+## Advanced Analysis
+
+### Habital Zone Analysis
+
+Planets in the habitable zone are of particular interest as they may harbor conditions suitable for life. The habitable zone is defined as the region around a star where liquid water could exist on a planet's surface. For this analysis, we calculate the inner and outer boundaries of the habitable zone for each star using the following formulas:
+
+$$
+\text{Habitable Zone Inner Boundary} = 0.75 \times \sqrt{L}
+$$
+
+$$
+\text{Habitable Zone Outer Boundary} = 1.5 \times \sqrt{L}
+$$
+
+where $L$ is the luminosity of the star, calculated as:
+
+$$
+L = R^2 \times \left(\frac{T}{5778}\right)^4
+$$
+
+Planets with orbital radii within these boundaries are classified as being "In the Habitable Zone."
+
+
+```{r habitalanalysis, echo=TRUE, message=FALSE, warning=FALSE}
+matched_data <- matched_data %>%
+  mutate(habitable_zone_inner = 0.75 * sqrt(luminosity),
+         habitable_zone_outer = 1.5 * sqrt(luminosity),
+         in_habitable_zone = radius > habitable_zone_inner & radius < habitable_zone_outer)
+
+ggplot(matched_data, aes(x = radius, fill = in_habitable_zone)) +
+  geom_histogram(binwidth = 0.05) +
+  labs(title = "Planets in the Habitable Zone",
+       x = "Orbital Radius (AU)",
+       y = "Frequency",
+       fill = "In Habitable Zone") +
+  theme_minimal()
+```
+
+The histogram above shows the distribution of planets based on their orbital radius, with planets classified as being "In the Habitable Zone" highlighted in blue. The habitable zone is defined by the inner and outer boundaries, calculated based on the star's luminosity. This analysis provides insights into the distribution of potentially habitable planets around different types of stars. The histogram below is cleaner with a limit of 5 AU to make it easier to read.
+
+```{r habitalanalysis2, echo=TRUE, message=FALSE, warning=FALSE}
+# Improved Habitable Zone Analysis
+ggplot(matched_data, aes(x = radius, fill = in_habitable_zone)) +
+  geom_histogram(binwidth = 0.05, position = "dodge", alpha = 0.8) +  # Increase bin width and adjust transparency
+  scale_fill_manual(values = c("FALSE" = "#F8766D", "TRUE" = "#00BFC4"), name = "In Habitable Zone") +
+  labs(title = "Planets in the Habitable Zone",
+       subtitle = "Distribution of planets based on their orbital radius",
+       x = "Orbital Radius (AU)",
+       y = "Frequency") +
+  coord_cartesian(xlim = c(0, 5)) +  # Adjust x-axis limits
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "top",
+    panel.grid.minor = element_blank()
+  )
+```
+
+The histogram above provides a clearer view of the distribution of planets based on their orbital radius, with planets classified as being "In the Habitable Zone" highlighted in blue. The habitable zone is defined by the inner and outer boundaries, calculated based on the star's luminosity. This analysis offers insights into the prevalence of potentially habitable planets around different types of stars.
+
+## Statistical Analysis
+
+### Regression Analysis: Stellar Mass and Radius
+
+To investigate the relationship between stellar mass and radius, we fit a linear regression model:
+
+$$
+\text{Stellar Mass} = \beta_0 + \beta_1 (\text{Radius}) + \beta_2 (\text{Effective Temperature}) + \epsilon
+$$
+
+```{r regression-analysis, echo=TRUE, message=FALSE, warning=FALSE}
+# Fit a regression model
+stellar_mass_model <- lm(st_mass ~ radius + effective_temperature, data = matched_data)
+
+# Display summary of the model
+summary(stellar_mass_model)
+```
+
+The regression analysis above explores the relationship between stellar mass and radius, considering the effect of effective temperature. The model coefficients provide insights into the impact of these variables on stellar properties. Understanding these relationships is essential for characterizing stars and predicting their properties based on observable parameters.
+
+### Hypothesis Testing: Planets in the Habitable Zone
+
+To determine whether the orbital radii of planets in the habitable zone differ significantly from those outside the habitable zone, we perform a two-sample t-test:
+
+$$
+H_0: \mu_{\text{in HZ}} = \mu_{\text{outside HZ}}
+$$
+
+$$
+H_a: \mu_{\text{in HZ}} \neq \mu_{\text{outside HZ}}
+$$
+
+```{r habitable-zone-t-test, echo=TRUE, message=FALSE, warning=FALSE}
+# Split data into two groups: in and outside the habitable zone
+in_hz <- matched_data %>% filter(in_habitable_zone) %>% pull(radius)
+outside_hz <- matched_data %>% filter(!in_habitable_zone) %>% pull(radius)
+
+# Perform t-test
+t_test_result <- t.test(in_hz, outside_hz)
+
+# Display results
+t_test_result
+```
+
+The results of the two-sample t-test indicate whether the mean orbital radii of planets in and outside the habitable zone are significantly different. This analysis provides insights into the distribution of potentially habitable planets and their orbital characteristics.
+
+### Correlation Analysis: Stellar Properties
+
+We examine the pairwise correlations between stellar properties (e.g., radius, mass, temperature, luminosity) to uncover linear relationships.
+
+```{r correlation-analysis, echo=TRUE, message=FALSE, warning=FALSE}
+# Select relevant columns
+stellar_properties <- matched_data %>%
+  select(radius, st_mass, effective_temperature, luminosity)
+
+# Compute correlation matrix
+correlation_matrix <- cor(stellar_properties, use = "complete.obs")
+
+# Display as a heatmap
+ggcorrplot(correlation_matrix, lab = TRUE, lab_size = 3, colors = c("red", "white", "blue"),
+           title = "Correlation Matrix of Stellar Properties")
+```
+
+The correlation matrix above illustrates the relationships between stellar properties, such as radius, mass, temperature, and luminosity. Positive correlations are observed between certain pairs of variables, indicating potential linear relationships. Understanding these correlations is essential for interpreting the data and identifying key factors that influence exoplanet characteristics.
+
+### Logistic Regression for Habitability
+
+A logistic regression model can predict whether a planet is in the habitable zone based on stellar and planetary properties.
+
+$$
+P(\text{In Habitable Zone}) = \frac{1}{1 + e^{-(\beta_0 + \beta_1 \cdot R + \beta_2 \cdot T + \beta_3 \cdot M)}}
+$$
+
+```{r logistic-regression, echo=TRUE, message=FALSE, warning=FALSE}
+# Fit logistic regression model
+habitability_model <- glm(in_habitable_zone ~ radius + effective_temperature + st_mass,
+                          data = matched_data, family = binomial)
+
+# Display summary
+summary(habitability_model)
+```
+
+The logistic regression model above predicts whether a planet is in the habitable zone based on stellar and planetary properties. The model coefficients provide insights into the significance of these variables in determining habitability. Understanding these relationships is crucial for identifying potentially habitable planets and assessing their likelihood of supporting life.
+
+## Conclusion
+
+This project explored the relationship between stellar and planetary characteristics, focusing on planets in the habitable zone. The key findings include:
+
+1. **Effective Temperature and Stellar Properties**:
+   - Most stars fall within the expected range for main-sequence stars, confirming the reliability of the dataset.
+   - Positive correlations between stellar radius, mass, and luminosity align with theoretical models of stellar evolution.
+
+2. **Habitable Zone Analysis**:
+   - A small fraction of planets are located within the habitable zone, emphasizing the rarity of Earth-like conditions.
+   - Stars with higher luminosity have larger habitable zones, but this does not always guarantee the presence of planets within those zones.
+
+3. **Exoplanet Characteristics**:
+   - The majority of planets are smaller and closer to their host stars, potentially due to biases in detection methods like transit photometry.
+
+4. **Detection Methods**:
+   - A diversity of detection methods highlights the complementary strengths of techniques such as transit photometry and radial velocity.
+
+### Implications
+
+These results have significant implications for the search for Earth-like planets:
+- Future missions should target stars with planets in the habitable zone, focusing on Sun-like stars.
+- Additional stellar properties such as metallicity or age could refine predictions of habitability.
+
+## References
+
+1. NASA Exoplanet Archive: [https://exoplanetarchive.ipac.caltech.edu](https://exoplanetarchive.ipac.caltech.edu)
+2. Gaia Archive: [https://gea.esac.esa.int/archive/](https://gea.esac.esa.int/archive/)
+
